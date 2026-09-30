@@ -36,8 +36,9 @@ Mythic+ and PvP.
 
 The only time Misspelled writes to the edit box is when you pick a suggestion from the
 right-click menu. While any addon restriction is active (combat, encounter, Mythic+, PvP,
-chat lockdown) it doesn't: it selects the misspelled word instead, so whatever you type
-replaces it, and shows the suggestion to type.
+chat lockdown) the suggestions are still listed but greyed out, and picking one does nothing,
+so the text you type is never touched. Ignore All and Add to Dictionary still work, since
+they don't change the text.
 
 Where the words are:
 The overlay has to know where each word is drawn. Widths come from a hidden FontString that
@@ -280,7 +281,6 @@ end
 
 --Enter or Escape. Blizzard's handler has already run and usually cleared the text.
 function Misspelled.EditBox_OnReset(editbox)
-	Misspelled:HideHint(editbox)
 	Misspelled:CheckEditBox(editbox, true)
 end
 
@@ -386,15 +386,8 @@ function Misspelled:CheckEditBox(editbox, force)
 	end
 end
 
---The overlay is only shown, and its OnUpdate only runs, while it has something to show.
-local function UpdateOverlayShown(state)
-	if state.overlay then
-		state.overlay:SetShown(#state.misspelled > 0 or state.hintShown == true)
-	end
-end
-
---Removes the underlines. The hint stays up while the user types a replacement (keepText),
---and goes on Enter, Escape, or when the text can't be read.
+--Removes the underlines. The overlay is hidden too, so its OnUpdate only runs while there
+--are misspelled words.
 function Misspelled:ClearEditBox(editbox, keepText)
 	local state = EditBoxState[editbox]
 	if state == nil then return end
@@ -407,12 +400,10 @@ function Misspelled:ClearEditBox(editbox, keepText)
 	end
 	if not keepText then
 		state.text = nil
-		state.hintShown = false
-		if state.hint then
-			state.hint:Hide()
-		end
 	end
-	UpdateOverlayShown(state)
+	if state.overlay then
+		state.overlay:Hide()
+	end
 end
 
 --Checks every edit box again, after the dictionary or ignored words changed.
@@ -660,6 +651,12 @@ function Misspelled:IsChatEditRestricted()
 	return false
 end
 
+--True when picking a suggestion may change the text in this edit box right now. Blizzard's
+--chat edit boxes are never changed while addons are restricted: the message would be blocked.
+function Misspelled:CanReplaceWords(editbox)
+	return not (BlizzardChatEditBoxes[editbox] and self:IsChatEditRestricted())
+end
+
 --Builds the menu entries shared by both menu implementations.
 function Misspelled:BuildSuggestionsMenu(editbox, entry)
 	local word = entry.Word
@@ -670,8 +667,17 @@ function Misspelled:BuildSuggestionsMenu(editbox, entry)
 		cached.Suggestions = WordDict:Suggest(word) or {}
 	end
 
+	--Suggestions stay listed, so the spelling can still be read, but are greyed out whenever
+	--they can't be used. Checked again while the menu is open and when one is clicked.
+	local function CanReplace()
+		return Misspelled:CanReplaceWords(editbox)
+	end
+
 	local items = {}
 	items[#items + 1] = {text = L["Suggestions for:"] .. " " .. word, isTitle = true}
+	if not CanReplace() then
+		items[#items + 1] = {text = L["Fixing words is paused during combat and encounters"], isTitle = true}
+	end
 
 	for _, suggestion in ipairs(cached.Suggestions) do
 		local suggestedWord = suggestion.Word
@@ -682,7 +688,7 @@ function Misspelled:BuildSuggestionsMenu(editbox, entry)
 		elseif self:IsFriend(suggestedWord) then
 			label = label .. " " .. L["(Friend)"]
 		end
-		items[#items + 1] = {text = label, func = function()
+		items[#items + 1] = {text = label, enabled = CanReplace, func = function()
 			Misspelled:ReplaceWord(editbox, entry, suggestedWord)
 		end}
 	end
@@ -708,6 +714,7 @@ local function LegacyDropDown_Initialize(frame, level)
 			info.text = item.text
 			info.isTitle = item.isTitle
 			info.func = item.func
+			info.disabled = item.enabled ~= nil and not item.enabled()
 		end
 		UIDropDownMenu_AddButton(info, level)
 	end
@@ -727,7 +734,10 @@ function Misspelled:ShowSuggestions(editbox, entry)
 				elseif item.isDivider then
 					rootDescription:CreateDivider()
 				else
-					rootDescription:CreateButton(item.text, item.func)
+					local button = rootDescription:CreateButton(item.text, item.func)
+					if item.enabled then
+						button:SetEnabled(item.enabled)
+					end
 				end
 			end
 		end)
@@ -743,8 +753,11 @@ function Misspelled:ShowSuggestions(editbox, entry)
 	end
 end
 
---Replaces a misspelled word with the suggestion the user picked.
+--Replaces a misspelled word with the suggestion the user picked. Does nothing while the
+--suggestions are greyed out (see CanReplaceWords): the text is left exactly as typed.
 function Misspelled:ReplaceWord(editbox, entry, suggestion)
+	if not self:CanReplaceWords(editbox) then return end
+
 	local text = editbox:GetText()
 	if text == nil or issecretvalue(text) then return end
 
@@ -765,17 +778,6 @@ function Misspelled:ReplaceWord(editbox, entry, suggestion)
 	local firstChar = string_sub(entry.Word, 1, 1)
 	if firstChar == string_upper(firstChar) then
 		suggestion = string_upper(string_sub(suggestion, 1, 1)) .. string_sub(suggestion, 2)
-	end
-
-	if BlizzardChatEditBoxes[editbox] and self:IsChatEditRestricted() then
-		--Setting the text now would taint the chat edit box and get the message blocked.
-		--Select the word instead, so typing replaces it, and show what to type.
-		if editbox:HasFocus() then
-			editbox:HighlightText(startPos - 1, endPos)
-		end
-		self:ShowHint(editbox, string_format(L["Type %s to replace it (auto-fix is paused during combat and encounters)"],
-			"|cffffffff" .. suggestion .. "|r"))
-		return
 	end
 
 	local newText = string_sub(text, 1, startPos - 1) .. suggestion .. string_sub(text, endPos + 1)
@@ -801,54 +803,6 @@ function Misspelled:IgnoreWord(word)
 	cached.Correct = true
 	cached.Suggestions = {}
 	self:RecheckAll()
-end
-
-local HINT_DURATION = 10 --Seconds the "type this" hint stays up
-
---A small note above the edit box. It stays up while the user types, and goes after a few
---seconds or on Enter or Escape.
-function Misspelled:ShowHint(editbox, message)
-	local state = GetState(editbox)
-	self:CreateOverlay(editbox, state)
-
-	local hint = state.hint
-	if hint == nil then
-		hint = CreateFrame("Frame", nil, state.overlay)
-		hint.background = hint:CreateTexture(nil, "BACKGROUND")
-		hint.background:SetAllPoints()
-		hint.background:SetColorTexture(0, 0, 0, 0.8)
-		hint.text = hint:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-		hint.text:SetPoint("CENTER")
-		state.hint = hint
-	end
-
-	local left = editbox:GetTextInsets()
-	hint:ClearAllPoints()
-	hint:SetPoint("BOTTOMLEFT", state.overlay, "TOPLEFT", left, 2)
-	hint.text:SetText(message)
-	hint:SetSize(hint.text:GetStringWidth() + 12, hint.text:GetStringHeight() + 8)
-	hint:Show()
-	state.hintShown = true
-	UpdateOverlayShown(state)
-
-	local token = {}
-	state.hintToken = token
-	C_Timer.After(HINT_DURATION, function()
-		if state.hintToken == token then
-			Misspelled:HideHint(editbox)
-		end
-	end)
-end
-
-function Misspelled:HideHint(editbox)
-	local state = EditBoxState[editbox]
-	if state == nil then return end
-	state.hintShown = false
-	state.hintToken = nil
-	if state.hint then
-		state.hint:Hide()
-	end
-	UpdateOverlayShown(state)
 end
 -----------------------------------------------------
 -- End: Right click Suggestions popup

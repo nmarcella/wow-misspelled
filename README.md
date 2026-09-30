@@ -12,7 +12,7 @@ Misspelled works with WIM (Wow Instant Messenger), and is compatible with: Prat,
 
 Misspelled is compatible with WoW (Midnight), WoW Forever, WoW Classic and Wow Classic BTC. If you are having problems with Misspelled, please try updating or disabling all other chat addons you may be running.
 
-**Combat and boss encounters:** Misspelled never changes the text you type and never hooks how chat messages are sent, so it doesn't taint Blizzard's chat and keeps spell checking in combat, boss encounters, Mythic+ and PvP. While Blizzard restricts addons (combat, encounters, Mythic+, PvP), picking a suggestion doesn't change your text: the misspelled word is selected instead, so what you type replaces it, and the suggestion is shown above the chat box. Out of combat, picking a suggestion replaces the word right away.
+**Combat and boss encounters:** Misspelled never changes the text you type and never hooks how chat messages are sent, so it doesn't taint Blizzard's chat and keeps spell checking in combat, boss encounters, Mythic+ and PvP. While Blizzard restricts addons (combat, encounters, Mythic+, PvP), misspelled words are still underlined and right-clicking one still lists the suggestions, but they're greyed out: Misspelled never changes your text then, because Blizzard would block the message. Ignore All and Add to Dictionary still work. Out of combat, picking a suggestion replaces the word right away.
 
 **Distribution Points**  
 **Curseforge:** [https://www.curseforge.com/wow/addons/misspelled](https://www.curseforge.com/wow/addons/misspelled)  

@@ -148,8 +148,7 @@ function hooksecurefunc(tableOrName, key, fn)
 end
 ChatFrameUtil = {ActivateChat = noop}
 
-local timers = {}
-C_Timer = {After = function(_, fn) timers[#timers + 1] = fn end}
+C_Timer = {After = noop}
 
 local menu
 MenuUtil = {CreateContextMenu = function(owner, generator)
@@ -157,7 +156,12 @@ MenuUtil = {CreateContextMenu = function(owner, generator)
 	local root = {
 		CreateTitle = function(_, text) table.insert(menu.items, {kind = "title", text = text}) end,
 		CreateDivider = function() table.insert(menu.items, {kind = "divider"}) end,
-		CreateButton = function(_, text, fn) table.insert(menu.items, {kind = "button", text = text, fn = fn}) end,
+		CreateButton = function(_, text, fn)
+			local item = {kind = "button", text = text, fn = fn}
+			table.insert(menu.items, item)
+			--Like Blizzard's menu: a function is polled, and a disabled button can't be picked.
+			return {SetEnabled = function(_, isEnabled) item.enabled = isEnabled end}
+		end,
 	}
 	generator(owner, root)
 end}
@@ -328,33 +332,72 @@ test("picking a suggestion out of combat replaces the word", function()
 		if item.kind == "button" and item.text == "world" then choice = item end
 	end
 	assert(choice, "'world' not suggested for 'wrold'")
+	assert(choice.enabled and choice.enabled(), "suggestion greyed out of combat")
 	choice.fn()
 	eq(chatFrameEditBox.text, "Hello world ok", "text")
 	eq(chatFrameEditBox.cursor, 12, "cursor after the word and its space")
 end)
 
-test("in combat a suggestion selects the word instead of changing the text", function()
+local function OpenMenuOnWrold()
 	Reset(chatFrameEditBox)
 	chatFrameEditBox:Type("Hello wrold ok")
+	mouseX = 100 + 15 + 7 * CHAR_WIDTH
+	menu = nil
+	chatFrameEditBox:Fire("OnMouseUp", "RightButton")
+	assert(menu, "menu didn't open")
+	local suggestion, ignore
+	for _, item in ipairs(menu.items) do
+		if item.kind == "button" and item.text == "world" then suggestion = item end
+		if item.kind == "button" and item.text == "Ignore All" then ignore = item end
+	end
+	return suggestion, ignore
+end
+
+test("typing and sending in combat never touches the chat edit box", function()
 	inCombat = true
-	timers = {}
-	Misspelled:ReplaceWord(chatFrameEditBox, {Word = "wrold", StartPos = 7, EndPos = 11}, "world")
+	Reset(chatFrameEditBox)
+	for c in ("out of manna, heal me pls"):gmatch(".") do
+		chatFrameEditBox:Type(c)
+	end
+	chatFrameEditBox.text, chatFrameEditBox.cursor = "", 0 -- Blizzard sends and clears it
+	chatFrameEditBox:Fire("OnTextChanged", false)
+	chatFrameEditBox:Fire("OnEnterPressed")
 	inCombat = false
-	eq(chatFrameEditBox.text, "Hello wrold ok", "text")
-	eq(#chatFrameEditBox.writes, 1, "number of writes")
-	eq(chatFrameEditBox.writes[1][1], "HighlightText", "write")
-	eq(chatFrameEditBox.writes[1][2], 6, "selection start")
-	eq(chatFrameEditBox.writes[1][3], 11, "selection end")
-	eq(#timers, 1, "hint timer")
+	eq(#chatFrameEditBox.writes, 0, "writes")
 end)
 
-test("chat lockdown also blocks replacing text", function()
-	Reset(chatFrameEditBox)
-	chatFrameEditBox:Type("Hello wrold ok")
+test("in combat suggestions are listed but greyed out, and never change the text", function()
+	inCombat = true
+	local suggestion, ignore = OpenMenuOnWrold()
+	eq(menu.items[2].text, "Fixing words is paused during combat and encounters", "note")
+	assert(suggestion, "'world' not listed")
+	eq(suggestion.enabled(), false, "suggestion enabled")
+	eq(ignore.enabled, nil, "Ignore All greyed out")
+
+	--Even if it were picked, nothing happens: no text change, no selection.
+	suggestion.fn()
+	Misspelled:ReplaceWord(chatFrameEditBox, {Word = "wrold", StartPos = 7, EndPos = 11}, "world")
+	eq(chatFrameEditBox.text, "Hello wrold ok", "text")
+	eq(#chatFrameEditBox.writes, 0, "writes")
+	inCombat = false
+end)
+
+test("suggestions grey out if combat starts while the menu is open", function()
+	local suggestion = OpenMenuOnWrold()
+	eq(suggestion.enabled(), true, "before combat")
+	inCombat = true
+	eq(suggestion.enabled(), false, "in combat")
+	inCombat = false
+end)
+
+test("chat lockdown also greys out suggestions", function()
 	C_ChatInfo.InChatMessagingLockdown = function() return true end
+	local suggestion = OpenMenuOnWrold()
+	eq(suggestion.enabled(), false, "suggestion enabled")
 	Misspelled:ReplaceWord(chatFrameEditBox, {Word = "wrold", StartPos = 7, EndPos = 11}, "world")
 	C_ChatInfo.InChatMessagingLockdown = function() return false end
 	eq(chatFrameEditBox.text, "Hello wrold ok", "text")
+	eq(#chatFrameEditBox.writes, 0, "writes")
 end)
 
 test("keeps the capital letter of the misspelled word", function()
@@ -377,10 +420,15 @@ test("friend names, with realm or surname, are valid words", function()
 	eq(Misspelled:IsFriend("Zanthor"), true, "IsFriend")
 end)
 
-test("Ignore All and Add to Dictionary take effect right away", function()
+test("Ignore All and Add to Dictionary take effect right away, in combat too", function()
+	Reset(chatFrameEditBox)
+	chatFrameEditBox:Type("zzqx ok")
 	eq(words(Misspelled:FindMisspelledWords("zzqx ok")), "zzqx@1-4")
+	inCombat = true
 	Misspelled:IgnoreWord("zzqx")
+	inCombat = false
 	eq(words(Misspelled:FindMisspelledWords("zzqx ok")), "")
+	eq(#chatFrameEditBox.writes, 0, "writes to the edit box")
 
 	Misspelled_DB.UserDict = {}
 	Misspelled:AddToUserDict("Qwzzle")
