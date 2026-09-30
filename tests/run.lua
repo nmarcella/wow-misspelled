@@ -53,19 +53,36 @@ end
 
 local function FakeFrame(parent)
 	local shown = true
+	local enabled = true
+	local height = 0
 	local scripts = {}
 	local frame
 	frame = FakeObject({
 		GetParent = function() return parent end,
 		CreateFontString = function() return FakeFontString() end,
 		CreateTexture = function() return FakeFrame(frame) end,
-		Show = function() shown = true end,
-		Hide = function() shown = false end,
+		Show = function(self)
+			local wasShown = shown
+			shown = true
+			if not wasShown and scripts.OnShow then scripts.OnShow(self) end
+		end,
+		Hide = function(self)
+			local wasShown = shown
+			shown = false
+			if wasShown and scripts.OnHide then scripts.OnHide(self) end
+		end,
 		SetShown = function(_, value) shown = value and true or false end,
 		IsShown = function() return shown end,
 		SetScript = function(_, name, fn) scripts[name] = fn end,
 		GetScript = function(_, name) return scripts[name] end,
 		GetChecked = function() return false end,
+		SetEnabled = function(_, value) enabled = value and true or false end,
+		IsEnabled = function() return enabled end,
+		SetHeight = function(_, h) height = h end,
+		GetHeight = function() return height end,
+		GetEffectiveScale = function() return 1 end,
+		--A click runs OnClick only on an enabled button, as in the client.
+		Click = function(self) if enabled and scripts.OnClick then scripts.OnClick(self, "LeftButton") end end,
 	})
 	return frame
 end
@@ -148,23 +165,35 @@ function hooksecurefunc(tableOrName, key, fn)
 end
 ChatFrameUtil = {ActivateChat = noop}
 
-C_Timer = {After = noop}
+C_Timer = {After = function(_, fn) fn() end}
 
-local menu
-MenuUtil = {CreateContextMenu = function(owner, generator)
-	menu = {owner = owner, items = {}}
-	local root = {
-		CreateTitle = function(_, text) table.insert(menu.items, {kind = "title", text = text}) end,
-		CreateDivider = function() table.insert(menu.items, {kind = "divider"}) end,
-		CreateButton = function(_, text, fn)
-			local item = {kind = "button", text = text, fn = fn}
-			table.insert(menu.items, item)
-			--Like Blizzard's menu: a function is polled, and a disabled button can't be picked.
-			return {SetEnabled = function(_, isEnabled) item.enabled = isEnabled end}
-		end,
-	}
-	generator(owner, root)
-end}
+--Blizzard's shared menus must never be used: menus opened by addon code taint the pooled menu
+--frames, and the unit frame menu then can't set raid target markers.
+local function NoBlizzardMenus() error("used one of Blizzard's shared menus", 2) end
+MenuUtil = {CreateContextMenu = NoBlizzardMenus}
+UIDropDownMenu_Initialize, ToggleDropDownMenu, CloseDropDownMenus = NoBlizzardMenus, NoBlizzardMenus, NoBlizzardMenus
+GameFontNormal, GameFontHighlight, GameFontDisable = {}, {}, {}
+
+--The rows of Misspelled's own suggestions popup, when it's shown.
+local function PopupRows()
+	local popup = _G.MisspelledSuggestionsPopup
+	if popup == nil or not popup:IsShown() then return nil end
+	local rows = {}
+	for _, row in ipairs(popup.rows) do
+		if row:IsShown() then
+			rows[#rows + 1] = {text = row.item.text, row = row, enabled = row:IsEnabled(), item = row.item}
+		end
+	end
+	return rows
+end
+local function FindRow(rows, text)
+	for _, r in ipairs(rows) do
+		if r.text == text then return r end
+	end
+end
+local function ClosePopup()
+	if _G.MisspelledSuggestionsPopup then _G.MisspelledSuggestionsPopup:Hide() end
+end
 
 local mouseX = 0
 function GetCursorPosition() return mouseX, 0 end
@@ -303,15 +332,17 @@ test("underline sits under the misspelled word", function()
 	chatFrameEditBox:Type("Hello wrold ok")
 	-- 7px per char, 15px left inset: "wrold" covers characters 7-11
 	mouseX = 100 + 15 + 6 * CHAR_WIDTH + 3
-	menu = nil
+	ClosePopup()
 	chatFrameEditBox:Fire("OnMouseUp", "RightButton")
-	assert(menu, "right-click on the word didn't open the menu")
-	eq(menu.items[1].text, "Suggestions for: wrold", "menu title")
+	local rows = PopupRows()
+	assert(rows, "right-click on the word didn't open the suggestions")
+	eq(rows[1].text, "Suggestions for: wrold", "title")
+	eq(rows[1].enabled, false, "title clickable")
 
-	menu = nil
+	ClosePopup()
 	mouseX = 100 + 15 + 1 * CHAR_WIDTH -- over "Hello"
 	chatFrameEditBox:Fire("OnMouseUp", "RightButton")
-	eq(menu, nil, "menu for a correctly spelled word")
+	eq(PopupRows(), nil, "suggestions for a correctly spelled word")
 end)
 
 test("scroll follows the caret like a single line edit box", function()
@@ -322,36 +353,28 @@ test("scroll follows the caret like a single line edit box", function()
 	eq(Misspelled.ComputeScroll(328, 400, 500, 372), 128, "text deleted from the end")
 end)
 
-test("picking a suggestion out of combat replaces the word", function()
+--Right-clicks "wrold" and returns the popup rows.
+local function OpenSuggestionsOnWrold()
 	Reset(chatFrameEditBox)
 	chatFrameEditBox:Type("Hello wrold ok")
 	mouseX = 100 + 15 + 7 * CHAR_WIDTH
+	ClosePopup()
 	chatFrameEditBox:Fire("OnMouseUp", "RightButton")
-	local choice
-	for _, item in ipairs(menu.items) do
-		if item.kind == "button" and item.text == "world" then choice = item end
-	end
-	assert(choice, "'world' not suggested for 'wrold'")
-	assert(choice.enabled and choice.enabled(), "suggestion greyed out of combat")
-	choice.fn()
+	local rows = PopupRows()
+	assert(rows, "suggestions didn't open")
+	assert(FindRow(rows, "world"), "'world' not suggested for 'wrold'")
+	return rows
+end
+
+test("picking a suggestion out of combat replaces the word", function()
+	local rows = OpenSuggestionsOnWrold()
+	local choice = FindRow(rows, "world")
+	eq(choice.enabled, true, "suggestion enabled")
+	choice.row:Click()
 	eq(chatFrameEditBox.text, "Hello world ok", "text")
 	eq(chatFrameEditBox.cursor, 12, "cursor after the word and its space")
+	eq(PopupRows(), nil, "popup still open after picking")
 end)
-
-local function OpenMenuOnWrold()
-	Reset(chatFrameEditBox)
-	chatFrameEditBox:Type("Hello wrold ok")
-	mouseX = 100 + 15 + 7 * CHAR_WIDTH
-	menu = nil
-	chatFrameEditBox:Fire("OnMouseUp", "RightButton")
-	assert(menu, "menu didn't open")
-	local suggestion, ignore
-	for _, item in ipairs(menu.items) do
-		if item.kind == "button" and item.text == "world" then suggestion = item end
-		if item.kind == "button" and item.text == "Ignore All" then ignore = item end
-	end
-	return suggestion, ignore
-end
 
 test("typing and sending in combat never touches the chat edit box", function()
 	inCombat = true
@@ -368,32 +391,44 @@ end)
 
 test("in combat suggestions are listed but greyed out, and never change the text", function()
 	inCombat = true
-	local suggestion, ignore = OpenMenuOnWrold()
-	eq(menu.items[2].text, "Fixing words is paused during combat and encounters", "note")
-	assert(suggestion, "'world' not listed")
-	eq(suggestion.enabled(), false, "suggestion enabled")
-	eq(ignore.enabled, nil, "Ignore All greyed out")
+	local rows = OpenSuggestionsOnWrold()
+	eq(rows[2].text, "Fixing words is paused during combat and encounters", "note")
+	local choice = FindRow(rows, "world")
+	eq(choice.enabled, false, "suggestion enabled")
+	eq(FindRow(rows, "Ignore All").enabled, true, "Ignore All enabled")
+	eq(FindRow(rows, "Add to Dictionary").enabled, true, "Add to Dictionary enabled")
 
-	--Even if it were picked, nothing happens: no text change, no selection.
-	suggestion.fn()
+	--Nothing happens even if it were picked: no text change, no selection.
+	choice.row:Click()
+	choice.item.func()
 	Misspelled:ReplaceWord(chatFrameEditBox, {Word = "wrold", StartPos = 7, EndPos = 11}, "world")
 	eq(chatFrameEditBox.text, "Hello wrold ok", "text")
 	eq(#chatFrameEditBox.writes, 0, "writes")
 	inCombat = false
 end)
 
-test("suggestions grey out if combat starts while the menu is open", function()
-	local suggestion = OpenMenuOnWrold()
-	eq(suggestion.enabled(), true, "before combat")
+test("suggestions grey out if combat starts while the popup is open", function()
+	local rows = OpenSuggestionsOnWrold()
+	eq(FindRow(rows, "world").enabled, true, "before combat")
 	inCombat = true
-	eq(suggestion.enabled(), false, "in combat")
+	local popup = _G.MisspelledSuggestionsPopup
+	popup:GetScript("OnEvent")(popup, "PLAYER_REGEN_DISABLED")
+	eq(FindRow(PopupRows(), "world").enabled, false, "in combat")
 	inCombat = false
+	popup:GetScript("OnEvent")(popup, "PLAYER_REGEN_ENABLED")
+	eq(FindRow(PopupRows(), "world").enabled, true, "after combat")
+end)
+
+test("Enter or Escape closes the popup", function()
+	OpenSuggestionsOnWrold()
+	chatFrameEditBox:Fire("OnEscapePressed")
+	eq(PopupRows(), nil, "popup open after Escape")
 end)
 
 test("chat lockdown also greys out suggestions", function()
 	C_ChatInfo.InChatMessagingLockdown = function() return true end
-	local suggestion = OpenMenuOnWrold()
-	eq(suggestion.enabled(), false, "suggestion enabled")
+	local rows = OpenSuggestionsOnWrold()
+	eq(FindRow(rows, "world").enabled, false, "suggestion enabled")
 	Misspelled:ReplaceWord(chatFrameEditBox, {Word = "wrold", StartPos = 7, EndPos = 11}, "world")
 	C_ChatInfo.InChatMessagingLockdown = function() return false end
 	eq(chatFrameEditBox.text, "Hello wrold ok", "text")

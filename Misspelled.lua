@@ -281,6 +281,7 @@ end
 
 --Enter or Escape. Blizzard's handler has already run and usually cleared the text.
 function Misspelled.EditBox_OnReset(editbox)
+	Misspelled:HideSuggestions(editbox)
 	Misspelled:CheckEditBox(editbox, true)
 end
 
@@ -657,7 +658,7 @@ function Misspelled:CanReplaceWords(editbox)
 	return not (BlizzardChatEditBoxes[editbox] and self:IsChatEditRestricted())
 end
 
---Builds the menu entries shared by both menu implementations.
+--Builds the entries of the suggestions popup.
 function Misspelled:BuildSuggestionsMenu(editbox, entry)
 	local word = entry.Word
 	local cached = WordCache[word]
@@ -700,57 +701,159 @@ function Misspelled:BuildSuggestionsMenu(editbox, entry)
 	return items
 end
 
-local LegacyDropDown
-local LegacyDropDownItems
+--[[
+The suggestions popup is built only from Misspelled's own frames. Blizzard's menus (MenuUtil,
+and UIDropDownMenu before it) share one pool of menu frames between every menu. A menu opened
+by addon code creates pooled frames under taint, and when the unit frame's right-click menu
+reuses them, its protected actions are blocked: setting a raid target marker (SetRaidTarget)
+failed with "Misspelled has been blocked from an action only available to the Blizzard UI".
+--]]
+local POPUP_PADDING = 8
+local POPUP_ROW_HEIGHT = 18
+local POPUP_DIVIDER_HEIGHT = 9
+local POPUP_MIN_WIDTH = 140
 
-local function LegacyDropDown_Initialize(frame, level)
-	for _, item in ipairs(LegacyDropDownItems or {}) do
-		local info = UIDropDownMenu_CreateInfo()
-		info.notCheckable = true
-		if item.isDivider then
-			info.text = ""
-			info.notClickable = true
-		else
-			info.text = item.text
-			info.isTitle = item.isTitle
-			info.func = item.func
-			info.disabled = item.enabled ~= nil and not item.enabled()
+local Popup
+
+local function PopupRow_OnClick(row)
+	local item = row.item
+	Popup:Hide()
+	if item and item.func and (item.enabled == nil or item.enabled()) then
+		item.func()
+	end
+end
+
+local function Popup_OnEvent(popup, event)
+	if event == "GLOBAL_MOUSE_DOWN" then
+		--Clicking anywhere else closes it, like Blizzard's menus.
+		if not popup:IsMouseOver() then
+			popup:Hide()
 		end
-		UIDropDownMenu_AddButton(info, level)
+	else
+		--Combat or an addon restriction started or ended: grey suggestions out, or back in.
+		--Restriction state isn't reported until ADDON_RESTRICTION_STATE_CHANGED has been dispatched.
+		C_Timer.After(0, function() Misspelled:RefreshPopup() end)
+	end
+end
+
+local function Popup_OnShow(popup)
+	popup:RegisterEvent("GLOBAL_MOUSE_DOWN")
+	popup:RegisterEvent("PLAYER_REGEN_DISABLED")
+	popup:RegisterEvent("PLAYER_REGEN_ENABLED")
+	if C_RestrictedActions then
+		popup:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED")
+	end
+end
+
+local function Popup_OnHide(popup)
+	popup:UnregisterAllEvents()
+	popup.items = nil
+	popup.editbox = nil
+end
+
+local function CreatePopup()
+	local popup = CreateFrame("Frame", "MisspelledSuggestionsPopup", UIParent)
+	popup:SetFrameStrata("FULLSCREEN_DIALOG")
+	popup:SetToplevel(true)
+	popup:SetClampedToScreen(true)
+	popup:EnableMouse(true)
+	popup:Hide()
+
+	local border = popup:CreateTexture(nil, "BACKGROUND")
+	border:SetAllPoints()
+	border:SetColorTexture(0.45, 0.45, 0.45, 1)
+	local background = popup:CreateTexture(nil, "BORDER")
+	background:SetPoint("TOPLEFT", 1, -1)
+	background:SetPoint("BOTTOMRIGHT", -1, 1)
+	background:SetColorTexture(0.05, 0.05, 0.05, 0.95)
+
+	popup.rows = {}
+	popup:SetScript("OnShow", Popup_OnShow)
+	popup:SetScript("OnHide", Popup_OnHide)
+	popup:SetScript("OnEvent", Popup_OnEvent)
+	return popup
+end
+
+local function AcquirePopupRow(popup, index)
+	local row = popup.rows[index]
+	if row == nil then
+		row = CreateFrame("Button", nil, popup)
+		row.text = row:CreateFontString(nil, "ARTWORK")
+		row.text:SetPoint("LEFT", 4, 0)
+		row.text:SetJustifyH("LEFT")
+		local highlight = row:CreateTexture(nil, "HIGHLIGHT")
+		highlight:SetAllPoints()
+		highlight:SetColorTexture(1, 1, 1, 0.15)
+		row.line = row:CreateTexture(nil, "ARTWORK")
+		row.line:SetPoint("LEFT", 4, 0)
+		row.line:SetPoint("RIGHT", -4, 0)
+		row.line:SetHeight(1)
+		row.line:SetColorTexture(0.45, 0.45, 0.45, 1)
+		row:SetScript("OnClick", PopupRow_OnClick)
+		popup.rows[index] = row
+	end
+	return row
+end
+
+--Lays out the popup's rows, and greys out the ones that can't be used right now.
+function Misspelled:RefreshPopup()
+	local popup = Popup
+	if popup == nil or popup.items == nil then return end
+
+	local y = -POPUP_PADDING
+	local width = POPUP_MIN_WIDTH
+	for i, item in ipairs(popup.items) do
+		local row = AcquirePopupRow(popup, i)
+		row.item = item
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT", popup, "TOPLEFT", POPUP_PADDING, y)
+		row:SetPoint("RIGHT", popup, "RIGHT", -POPUP_PADDING, 0)
+		if item.isDivider then
+			row:SetHeight(POPUP_DIVIDER_HEIGHT)
+			row.text:SetText("")
+			row.line:Show()
+			row:SetEnabled(false)
+		else
+			local enabled = not item.isTitle and (item.enabled == nil or item.enabled())
+			row:SetHeight(POPUP_ROW_HEIGHT)
+			row.line:Hide()
+			row.text:SetFontObject(item.isTitle and GameFontNormal or (enabled and GameFontHighlight or GameFontDisable))
+			row.text:SetText(item.text)
+			row:SetEnabled(enabled)
+			width = math_max(width, row.text:GetStringWidth() + 2 * POPUP_PADDING + 8)
+		end
+		row:Show()
+		y = y - row:GetHeight()
+	end
+	for i = #popup.items + 1, #popup.rows do
+		popup.rows[i]:Hide()
+	end
+	popup:SetSize(width, POPUP_PADDING - y)
+end
+
+function Misspelled:HideSuggestions(editbox)
+	if Popup and Popup:IsShown() and (editbox == nil or Popup.editbox == editbox) then
+		Popup:Hide()
 	end
 end
 
 function Misspelled:ShowSuggestions(editbox, entry)
 	if WordCache[entry.Word] == nil then return end
-	local items = self:BuildSuggestionsMenu(editbox, entry)
-
-	if MenuUtil and MenuUtil.CreateContextMenu then
-		--Blizzard's menu system (Midnight, WoW Forever), owned by our overlay frame.
-		local owner = EditBoxState[editbox] and EditBoxState[editbox].overlay or editbox
-		MenuUtil.CreateContextMenu(owner, function(_, rootDescription)
-			for _, item in ipairs(items) do
-				if item.isTitle then
-					rootDescription:CreateTitle(item.text)
-				elseif item.isDivider then
-					rootDescription:CreateDivider()
-				else
-					local button = rootDescription:CreateButton(item.text, item.func)
-					if item.enabled then
-						button:SetEnabled(item.enabled)
-					end
-				end
-			end
-		end)
-	elseif UIDropDownMenu_Initialize then
-		--Older game clients
-		if LegacyDropDown == nil then
-			LegacyDropDown = CreateFrame("Frame", "MisspelledSuggestions_DropDown", UIParent, "UIDropDownMenuTemplate")
-		end
-		LegacyDropDownItems = items
-		CloseDropDownMenus()
-		UIDropDownMenu_Initialize(LegacyDropDown, LegacyDropDown_Initialize, "MENU")
-		ToggleDropDownMenu(1, nil, LegacyDropDown, "cursor")
+	if Popup == nil then
+		Popup = CreatePopup()
 	end
+
+	Popup:Hide()
+	Popup.items = self:BuildSuggestionsMenu(editbox, entry)
+	Popup.editbox = editbox
+	self:RefreshPopup()
+
+	--Open at the mouse, growing upward from the chat box.
+	local x, y = GetCursorPosition()
+	local scale = Popup:GetEffectiveScale()
+	Popup:ClearAllPoints()
+	Popup:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", x / scale, y / scale)
+	Popup:Show()
 end
 
 --Replaces a misspelled word with the suggestion the user picked. Does nothing while the

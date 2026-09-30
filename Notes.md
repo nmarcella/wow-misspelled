@@ -22,6 +22,7 @@ Rules the chat code follows so it doesn't taint Blizzard's chat:
 - Never call `SetText`, `Insert`, `HighlightText`, `SetFocus` or `SetAttribute` on a Blizzard chat edit box automatically. `SetText` runs Blizzard's `OnTextChanged` / `ParseText` under taint. The only write is picking a suggestion out of combat (`ReplaceWord`). While restricted (`CanReplaceWords`) the suggestions are greyed out with a polled `SetEnabled` function, and `ReplaceWord` does nothing.
 - Only post-hooks: `HookScript`, `hooksecurefunc`. Never `SetScript` on Blizzard frames, and never write fields onto them (state lives in weak-keyed tables).
 - Misspellings are underlined on Misspelled's own overlay frame (a child of the edit box).
+- Never open Blizzard's shared menus (`MenuUtil`, `UIDropDownMenu`). They pool menu frames between all menus, so a menu opened by addon code taints the frames the unit frame's right-click menu reuses, and its protected actions fail: setting a raid target marker (`SetRaidTarget`, protected since 12.0) gave "Misspelled has been blocked from an action only available to the Blizzard UI". The suggestions popup is built from Misspelled's own frames.
 
 Still to check in the live Forever client:
 - Underlines line up with the words, including long messages that scroll sideways (`ComputeScroll` follows the caret, since there's no API for the edit box's scroll offset).
