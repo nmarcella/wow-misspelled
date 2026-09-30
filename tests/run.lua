@@ -39,15 +39,23 @@ local function VisibleText(s)
 	return s
 end
 
-local function FakeFontString()
+--Like the client, a font string has a font only from its template, SetFont or SetFontObject,
+--and SetText fails without one.
+local function FakeFontString(template)
 	local text = ""
+	local hasFont = template ~= nil
 	return FakeObject({
-		SetText = function(_, s) text = s or "" end,
+		SetFont = function() hasFont = true; return true end,
+		SetFontObject = function() hasFont = true end,
+		SetText = function(_, s)
+			if not hasFont then error("FontString:SetText(): Font not set", 2) end
+			text = s or ""
+		end,
 		GetText = function() return text end,
 		GetUnboundedStringWidth = function() return #VisibleText(text) * CHAR_WIDTH end,
 		GetStringWidth = function() return #VisibleText(text) * CHAR_WIDTH end,
 		GetStringHeight = function() return 12 end,
-		GetFont = function() return "Fonts\\ARIALN.TTF", 14, "" end,
+		GetFont = function() if hasFont then return "Fonts\\ARIALN.TTF", 14, "" end end,
 	})
 end
 
@@ -59,7 +67,7 @@ local function FakeFrame(parent)
 	local frame
 	frame = FakeObject({
 		GetParent = function() return parent end,
-		CreateFontString = function() return FakeFontString() end,
+		CreateFontString = function(_, _, _, template) return FakeFontString(template) end,
 		CreateTexture = function() return FakeFrame(frame) end,
 		Show = function(self)
 			local wasShown = shown
@@ -90,7 +98,7 @@ end
 function CreateFrame(frameType, name, parent, template)
 	local frame = FakeFrame(parent)
 	if template == "UICheckButtonTemplate" then
-		rawset(frame, "Text", FakeFontString())
+		rawset(frame, "Text", FakeFontString("GameFontNormalSmall"))
 	end
 	if name then _G[name] = frame end
 	return frame

@@ -473,7 +473,8 @@ function Misspelled:CreateOverlay(editbox, state)
 	overlay:SetScript("OnUpdate", Overlay_OnUpdate)
 
 	--Hidden font string, used to measure the width of the text as the edit box draws it.
-	local measure = overlay:CreateFontString(nil, "BACKGROUND")
+	--It starts with the chat font: SetText fails on a font string that has no font.
+	local measure = overlay:CreateFontString(nil, "BACKGROUND", "ChatFontNormal")
 	measure:SetPoint("TOPLEFT")
 	measure:SetAlpha(0)
 
@@ -778,7 +779,7 @@ local function AcquirePopupRow(popup, index)
 	local row = popup.rows[index]
 	if row == nil then
 		row = CreateFrame("Button", nil, popup)
-		row.text = row:CreateFontString(nil, "ARTWORK")
+		row.text = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight") -- SetText fails without a font
 		row.text:SetPoint("LEFT", 4, 0)
 		row.text:SetJustifyH("LEFT")
 		local highlight = row:CreateTexture(nil, "HIGHLIGHT")
